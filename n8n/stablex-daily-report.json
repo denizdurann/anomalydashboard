@@ -1,0 +1,224 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        -848
+      ],
+      "id": "f472dc87-144a-4218-a2fb-3b12a1c48a8e",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "const statRows     = $(\"statistics\").all().map(i => i.json);\nconst infoRows     = $(\"info\").all().map(i => i.json);\nconst lifetimeRows = $(\"lifetime\").all().map(i => i.json).filter(r => r && r.advertisement_id != null);\n\n// ============================================================\n// SABİT CPM AYARI\n// Tüm maliyet (spending) ve CPC değerleri bu CPM üzerinden\n// yeniden hesaplanır. Farklı bir değer için sadece bu satırı değiştir.\n// Formül: spending = views * FIXED_CPM / 1000\n// ============================================================\nconst FIXED_CPM = 70; // ₺  (1000 gösterim başına maliyet)\n\nconst adInfoById = new Map(\n  infoRows.map(r => [String(r.ad_id), {\n    ad_name:       r.ad_name,\n    campaign_id:   r.ca_id,\n    campaign_name: r.cam_name,\n  }])\n);\n\nconst pad = (n) => String(n).padStart(2, '0');\nfunction dayStrOf(r) {\n  const raw = r.day;\n  if (typeof raw === 'string') return raw.slice(0, 10);\n  if (raw instanceof Date) {\n    return raw.getUTCFullYear() + '-' + pad(raw.getUTCMonth() + 1) + '-' + pad(raw.getUTCDate());\n  }\n  return String(raw).slice(0, 10);\n}\nfunction addDaysStr(dateStr, days) {\n  const parts = dateStr.split('-').map(Number);\n  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));\n  dt.setUTCDate(dt.getUTCDate() + days);\n  return dt.getUTCFullYear() + '-' + pad(dt.getUTCMonth() + 1) + '-' + pad(dt.getUTCDate());\n}\n\n// ---- Sabit CPM'e göre maliyet hesabı ----\nfunction spendFromViews(views) {\n  return (Number(views) || 0) * FIXED_CPM / 1000;\n}\n\n// ---- Anchor: takvim \"dün\" (Europe/Istanbul) ----\nconst todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Istanbul' });\nconst maxDay   = addDaysStr(todayIst, -1);\nconst cutoff7  = addDaysStr(maxDay, -6);\nconst cutoff30 = addDaysStr(maxDay, -29);\n\n// ---- Kampanya bazında toplamlar ----\n// Her kampanya için: dün / son 7 gün / son 30 gün / tüm zamanlar\nconst campaigns = new Map();\nfunction campaignOf(adId, fallbackCampaignId) {\n  const info = adInfoById.get(String(adId)) || {};\n  const id   = info.campaign_id ?? fallbackCampaignId ?? null;\n  const key  = String(id);\n  if (!campaigns.has(key)) {\n    campaigns.set(key, {\n      campaign_id:   id,\n      campaign_name: info.campaign_name || null,\n      views_1d: 0,  clicks_1d: 0,  spend_1d: 0,\n      views_7d: 0,  clicks_7d: 0,  spend_7d: 0,\n      views_30d: 0, clicks_30d: 0, spend_30d: 0,\n      views_total: 0, clicks_total: 0, spend_total: 0,\n    });\n  }\n  const c = campaigns.get(key);\n  if (!c.campaign_name && info.campaign_name) c.campaign_name = info.campaign_name;\n  return c;\n}\n\n// ---- Global 7d / 30d toplamları (tüm statRows, dün filtresiz) ----\n// Maliyet sabit CPM üzerinden: spending = views * FIXED_CPM / 1000\nlet sum7  = { views: 0, clicks: 0, spending: 0 };\nlet sum30 = { views: 0, clicks: 0, spending: 0 };\n\nfor (const r of statRows) {\n  const d = dayStrOf(r);\n  const v = Number(r.views    ?? 0);\n  const c = Number(r.clicks   ?? 0);\n  const s = spendFromViews(v);            // <-- sabit CPM'e göre yeniden hesaplandı\n  if (d >= cutoff30 && d <= maxDay) {\n    const cam = campaignOf(r.advertisement_id, r.campaign_id);\n    sum30.views += v; sum30.clicks += c; sum30.spending += s;\n    cam.views_30d += v; cam.clicks_30d += c; cam.spend_30d += s;\n    if (d >= cutoff7) {\n      sum7.views += v; sum7.clicks += c; sum7.spending += s;\n      cam.views_7d += v; cam.clicks_7d += c; cam.spend_7d += s;\n    }\n    if (d === maxDay) {\n      cam.views_1d += v; cam.clicks_1d += c; cam.spend_1d += s;\n    }\n  }\n}\n\n// ---- Tüm zamanlar (lifetime node'undan, reklam bazında) ----\nlet sumAll = { views: 0, clicks: 0, spending: 0 };\nfor (const r of lifetimeRows) {\n  const v = Number(r.views  ?? 0);\n  const c = Number(r.clicks ?? 0);\n  const s = spendFromViews(v);\n  sumAll.views += v; sumAll.clicks += c; sumAll.spending += s;\n  const cam = campaignOf(r.advertisement_id, r.campaign_id);\n  cam.views_total += v; cam.clicks_total += c; cam.spend_total += s;\n}\n\n// ---- Per-ad (dün) satırları ----\nconst byAd = new Map();\nfor (const r of statRows) {\n  if (!byAd.has(r.advertisement_id)) byAd.set(r.advertisement_id, []);\n  byAd.get(r.advertisement_id).push(r);\n}\n\nconst output = [];\nfor (const [adId, rows] of byAd) {\n  const info  = adInfoById.get(String(adId)) || {};\n  const daily = rows.find(r => dayStrOf(r) === maxDay);\n  if (!daily) continue; // dün verisi olmayan reklamlar tabloya girmez\n\n  const dViews  = Number(daily.views)  || 0;\n  const dClicks = Number(daily.clicks) || 0;\n  const dSpend  = spendFromViews(dViews);            // <-- sabit CPM'e göre maliyet\n\n  output.push({\n    advertisement_id:   adId,\n    advertisement_name: info.ad_name       || null,\n    campaign_id:        info.campaign_id   ?? daily.campaign_id ?? null,\n    campaign_name:      info.campaign_name || null,\n    day:      dayStrOf(daily),\n    views:    dViews,\n    clicks:   dClicks,\n    spending: dSpend,                                          // <-- yeniden hesaplandı\n    cpm: dViews  > 0 ? FIXED_CPM : null,                       // <-- sabit CPM\n    cpc: dClicks > 0 ? dSpend / dClicks : null,                // <-- yeniden hesaplandı\n    ctr: daily.ctr != null ? Number(daily.ctr) : null,         // CTR maliyetten etkilenmez, aynen kalır\n  });\n}\n\n// ---- Kampanya özet satırları (period: 'campaign') ----\n// Sadece son 30 günde gösterimi olan (aktif) kampanyalar rapora girer.\nconst campaignList = [...campaigns.values()]\n  .filter(c => c.views_30d > 0)\n  .sort((a, b) => String(a.campaign_name ?? a.campaign_id)\n    .localeCompare(String(b.campaign_name ?? b.campaign_id), 'tr'));\n\nfor (const c of campaignList) {\n  output.push({\n    advertisement_id: null,\n    advertisement_name: null,\n    period: 'campaign',\n    day: null,\n    ...c,\n  });\n}\n\n// ---- Özet satırlar (day: null) ----\noutput.push({\n  advertisement_id: null,\n  advertisement_name: null,\n  campaign_id: null,\n  campaign_name: null,\n  period:   '7d',\n  day:      null,\n  views:    sum7.views,\n  clicks:   sum7.clicks,\n  spending: sum7.spending,\n});\noutput.push({\n  advertisement_id: null,\n  advertisement_name: null,\n  campaign_id: null,\n  campaign_name: null,\n  period:   '30d',\n  day:      null,\n  views:    sum30.views,\n  clicks:   sum30.clicks,\n  spending: sum30.spending,\n});\noutput.push({\n  advertisement_id: null,\n  advertisement_name: null,\n  campaign_id: null,\n  campaign_name: null,\n  period:   'all',\n  day:      null,\n  views:    sumAll.views,\n  clicks:   sumAll.clicks,\n  spending: sumAll.spending,\n});\n\nreturn output.map(json => ({ json }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -848
+      ],
+      "id": "64680b32-75db-4064-bf6a-a1b9cce47c88",
+      "name": "merge",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "query": "=SELECT\n      day,\n      campaign_id,\n      ads_id                                                       AS advertisement_id,\n      sum(v_views)                                                 AS views,\n      sum(v_clicks)                                                AS clicks,\n      sum(v_spend)                                                 AS spending,\n      CASE WHEN sum(v_views) > 0\n           THEN round(sum(v_spend) * 1000 / sum(v_views), 5)\n           ELSE NULL END                                           AS cpm,\n      CASE WHEN sum(v_clicks) > 0\n           THEN round(sum(v_spend) / sum(v_clicks), 5)\n           ELSE NULL END                                           AS cpc,\n      CASE WHEN sum(v_views) > 0\n           THEN round(sum(v_clicks) / sum(v_views) * 100, 5)\n           ELSE NULL END                                           AS ctr\n  FROM (\n      SELECT\n          day,\n          campaign_id,\n          ads_id,\n          total_views            AS v_views,\n          0                      AS v_clicks,\n          advertiser_spend_sum   AS v_spend\n      FROM analytics.mv_impression_daily\n      WHERE ads_id IN ({{ $(\"info\").all().map(a=>a.json.ad_id) }})\n        AND day >= toDate(now()) - 31\n        AND day <= toDate(now()) - 1\n      UNION ALL\n      SELECT\n          day,\n          campaign_id,\n          ads_id,\n          0             AS v_views,\n          total_clicks  AS v_clicks,\n          0             AS v_spend\n      FROM analytics.mv_click_daily\n      WHERE ads_id IN ({{ $(\"info\").all().map(a=>a.json.ad_id) }})\n        AND day >= toDate(now()) - 31\n        AND day <= toDate(now()) - 1\n  )\n  GROUP BY day, campaign_id, ads_id\n  ORDER BY day DESC, campaign_id, ads_id;",
+        "options": {
+          "limit": 9999
+        }
+      },
+      "type": "n8n-nodes-clickhouse-db.clickHouse",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -848
+      ],
+      "id": "d893d8c1-a440-4741-ba79-9b6a521612f6",
+      "name": "statistics",
+      "executeOnce": true,
+      "notesInFlow": false,
+      "credentials": {
+        "clickHouseApi": {
+          "id": "SrQ4YMddh6BRD98a",
+          "name": "ClickHouse account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "=SELECT\n      campaign_id,\n      ads_id         AS advertisement_id,\n      sum(v_views)   AS views,\n      sum(v_clicks)  AS clicks\n  FROM (\n      SELECT\n          campaign_id,\n          ads_id,\n          total_views   AS v_views,\n          0             AS v_clicks\n      FROM analytics.mv_impression_daily\n      WHERE ads_id IN ({{ $(\"info\").all().map(a=>a.json.ad_id) }})\n        AND day <= toDate(now()) - 1\n      UNION ALL\n      SELECT\n          campaign_id,\n          ads_id,\n          0             AS v_views,\n          total_clicks  AS v_clicks\n      FROM analytics.mv_click_daily\n      WHERE ads_id IN ({{ $(\"info\").all().map(a=>a.json.ad_id) }})\n        AND day <= toDate(now()) - 1\n  )\n  GROUP BY campaign_id, ads_id\n  ORDER BY campaign_id, ads_id;",
+        "options": {
+          "limit": 9999
+        }
+      },
+      "type": "n8n-nodes-clickhouse-db.clickHouse",
+      "typeVersion": 2,
+      "position": [
+        672,
+        -848
+      ],
+      "id": "5b0e7c1a-3f2d-4e8b-9a61-c2d4f8e1a7b3",
+      "name": "lifetime",
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "notesInFlow": true,
+      "notes": "Kampanya bazında tüm zamanlar (toplam) harcama için reklam bazlı lifetime görüntülenme/tıklama",
+      "credentials": {
+        "clickHouseApi": {
+          "id": "SrQ4YMddh6BRD98a",
+          "name": "ClickHouse account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT a.id as ad_id, a.name as ad_name, c.id as ca_id, c.name as cam_name\nFROM advertisement a\nJOIN advertisement_group ag ON ag.id = a.\"advertisementGroupId\"\nJOIN campaign c ON ag.\"campaignId\" = c.id\nWHERE c.\"advertiserId\" IN (4653)",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        -848
+      ],
+      "id": "48a4b164-b038-406c-922d-03d94368b389",
+      "name": "info",
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "7StTqYs6LOqTztzV",
+          "name": "magfiads-prod-campaign"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// n8n Code Node — MagfiADS Günlük Özet E-posta HTML\n// =====================================================\n// Görseller — Magfi CDN\nconst IMG_LOGO     = 'https://gcdn.magfiads.com/assets/static/icons/Page-1.png';\nconst IMG_LINKEDIN = 'https://gcdn.magfiads.com/assets/static/icons/linkedin.png';\nconst IMG_TELEGRAM = 'https://gcdn.magfiads.com/assets/static/icons/telegram.png';\nconst IMG_MEDIUM   = 'https://gcdn.magfiads.com/assets/static/icons/medium.png';\n\n// ---- Tüm girdileri al ----\nconst allInputs = $input.all().map(i => i.json).filter(Boolean);\n\n// Per-ad (dün) satırları — tabloyu ve günlük toplamları bunlar doldurur\nconst ads = allInputs.filter(r => r.advertisement_id != null);\nconst dailyAds = ads;\n\n// Kampanya bazında özet satırları (merge node'undan, period: 'campaign')\nconst campaignSummaries = allInputs.filter(r => r.advertisement_id == null && r.period === 'campaign');\n\n// ---- Rapor tarihi (ads[0].day zaten \"YYYY-MM-DD\" = dün) ----\nconst reportDateStr = ads[0]?.day;\nconst reportDate = reportDateStr\n  ? new Date(reportDateStr + 'T00:00:00Z')\n  : (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d; })();\nconst dateStr = reportDate.toLocaleDateString('tr-TR', {\n  year: 'numeric', month: 'long', day: 'numeric'\n});\nconst now = new Date().toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul' });\n\n// ---- Formatlar ----\nconst formatMoney = (val) =>\n  new Intl.NumberFormat('tr-TR', {\n    style: 'currency', currency: 'TRY', minimumFractionDigits: 2\n  }).format(Number(val) || 0);\nconst formatNumber  = (val) => new Intl.NumberFormat('tr-TR').format(Number(val) || 0);\nconst formatPercent = (val) => '%' + (Number(val) || 0).toFixed(2);\nconst esc = (val) => String(val ?? '')\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n  .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');\n\n// ---- Günlük toplamlar (dün) ----\nlet totalSpend = 0, totalClicks = 0, totalViews = 0;\nads.forEach(a => {\n  totalSpend  += Number(a.spending) || 0;\n  totalClicks += Number(a.clicks)   || 0;\n  totalViews  += Number(a.views)    || 0;\n});\n// ---- Görüntülenme 0 ise maili gönderme (workflow burada durur) ----\nif (totalViews === 0) {\n  return [];\n}\nconst totalCpm = totalViews  > 0 ? (totalSpend / totalViews * 1000) : 0;\nconst totalCpc = totalClicks > 0 ? (totalSpend / totalClicks)       : 0;\nconst totalCtr = totalViews  > 0 ? (totalClicks / totalViews * 100) : 0;\n\n// ---- 7 gün / 30 gün / tüm zamanlar (merge'ün day:null özet satırlarından) ----\nconst summary7d  = allInputs.find(r => r.advertisement_id == null && r.period === '7d')  || {};\nconst summary30d = allInputs.find(r => r.advertisement_id == null && r.period === '30d') || {};\nconst summaryAll = allInputs.find(r => r.advertisement_id == null && r.period === 'all') || {};\nconst spend7d   = Number(summary7d.spending)  || 0;\nconst spend30d  = Number(summary30d.spending) || 0;\nconst spendAll  = Number(summaryAll.spending) || 0;\n\n// ---- Kampanya bazında harcama kartları (her satırda en fazla 3 kart) ----\nconst campaignCard = (c) => {\n  const camName = esc(c.campaign_name || c.campaign_id);\n  const line = (label, value, bold) => `\n                          <tr>\n                            <td style=\"padding:4px 0; font-family:Inter,Arial,sans-serif; font-size:12px; color:#475467;\">${label}</td>\n                            <td style=\"padding:4px 0; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:${bold ? 700 : 600}; color:#0C111D; text-align:right; white-space:nowrap;\">${value}</td>\n                          </tr>`;\n  return `\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#FFFFFF; border:1px solid #EAECF0; border-radius:16px;\">\n                      <tr><td style=\"padding:18px 16px;\">\n                        <p style=\"margin:0 0 12px; font-family:Inter,Arial,sans-serif; font-size:13px; font-weight:600; color:#6941C6; line-height:18px;\">${camName}</p>\n                        <p style=\"margin:0 0 4px; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#475467; text-transform:uppercase; letter-spacing:0.5px;\">D&#252;nk&#252; Harcama</p>\n                        <p style=\"margin:0 0 4px; font-family:Inter,Arial,sans-serif; font-size:20px; font-weight:700; color:#0C111D;\">${formatMoney(c.spend_1d)}</p>\n                        <p style=\"margin:0 0 12px; font-family:Inter,Arial,sans-serif; font-size:11px; color:#475467;\">${formatNumber(c.views_1d)} g&#246;r&#252;nt&#252;lenme &#183; ${formatNumber(c.clicks_1d)} t&#305;klama</p>\n                        <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-top:1px solid #EAECF0;\">\n                          <tr><td colspan=\"2\" style=\"font-size:0; line-height:0; padding-top:6px;\">&#160;</td></tr>${line('Son 7 G&#252;n', formatMoney(c.spend_7d))}${line('Son 30 G&#252;n', formatMoney(c.spend_30d))}${line('Toplam Harcama', formatMoney(c.spend_total), true)}\n                        </table>\n                      </td></tr>\n                    </table>`;\n};\n\nlet campaignCardsHtml = '';\nif (campaignSummaries.length > 0) {\n  const perRow = Math.min(3, campaignSummaries.length);\n  const cellWidth = Math.floor(100 / perRow) + '%';\n  for (let i = 0; i < campaignSummaries.length; i += perRow) {\n    const chunk = campaignSummaries.slice(i, i + perRow);\n    let cells = '';\n    for (let j = 0; j < perRow; j++) {\n      const padding = perRow === 1 ? '0' : j === 0 ? '0 4px 0 0' : j === perRow - 1 ? '0 0 0 4px' : '0 4px';\n      cells += `\n                  <td width=\"${cellWidth}\" valign=\"top\" style=\"padding:${padding};\">${chunk[j] ? campaignCard(chunk[j]) : '&#160;'}</td>`;\n    }\n    campaignCardsHtml += `\n          <tr>\n            <td style=\"padding:0 32px ${i + perRow >= campaignSummaries.length ? 28 : 8}px;\">\n              <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\n                <tr>${cells}\n                </tr>\n              </table>\n            </td>\n          </tr>`;\n  }\n  campaignCardsHtml = `\n          <tr>\n            <td style=\"padding:0 32px 16px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:16px; font-weight:600; color:#0C111D;\">Kampanya Baz&#305;nda Harcama</p>\n            </td>\n          </tr>` + campaignCardsHtml;\n}\n\n// ---- Kampanya tablo satırları (kampanyaya göre gruplu + ara toplamlar) ----\nconst cell = (content, opts = {}) =>\n  `<td${opts.colspan ? ` colspan=\"${opts.colspan}\"` : ''} style=\"padding:10px 8px; font-family:Inter,Arial,sans-serif; font-size:${opts.size || 11}px;${opts.weight ? ` font-weight:${opts.weight};` : ''} color:${opts.color || '#475467'};${opts.left ? '' : ' text-align:right;'} border-bottom:1px solid #EAECF0;${opts.left ? '' : ' white-space:nowrap;'}\">${content}</td>`;\n\nconst metricCells = (spend, views, clicks, weight) => {\n  const cpm = views  > 0 ? spend / views * 1000  : 0;\n  const cpc = clicks > 0 ? spend / clicks        : 0;\n  const ctr = views  > 0 ? clicks / views * 100  : 0;\n  return [\n    cell(formatMoney(spend),  { weight: 700, color: '#101828' }),\n    cell(formatNumber(views), { weight }),\n    cell(formatNumber(clicks),{ weight }),\n    cell(formatMoney(cpm),    { weight }),\n    cell(formatMoney(cpc),    { weight }),\n    cell(formatPercent(ctr),  { weight }),\n  ].join('\\n    ');\n};\n\nconst groups = new Map();\ndailyAds.forEach(a => {\n  const key = String(a.campaign_id);\n  if (!groups.has(key)) groups.set(key, { name: a.campaign_name || a.campaign_id, ads: [] });\n  groups.get(key).ads.push(a);\n});\nconst sortedGroups = [...groups.values()]\n  .sort((x, y) => String(x.name).localeCompare(String(y.name), 'tr'));\n\nlet campaignRows = '';\nsortedGroups.forEach(g => {\n  let gSpend = 0, gViews = 0, gClicks = 0;\n  g.ads\n    .sort((x, y) => String(x.advertisement_name ?? x.advertisement_id)\n      .localeCompare(String(y.advertisement_name ?? y.advertisement_id), 'tr'))\n    .forEach((a, i) => {\n      gSpend  += Number(a.spending) || 0;\n      gViews  += Number(a.views)    || 0;\n      gClicks += Number(a.clicks)   || 0;\n      const bg = i % 2 === 0 ? '#FFFFFF' : '#F9FAFB';\n      campaignRows += `\n    <tr style=\"background-color:${bg};\">\n      ${cell(esc(g.name), { left: true, size: 12, weight: 500, color: '#101828' })}\n      ${cell(esc(a.advertisement_name || a.advertisement_id), { left: true, size: 12 })}\n      ${cell(formatMoney(a.spending), { weight: 600, color: '#101828' })}\n      ${cell(formatNumber(a.views))}\n      ${cell(formatNumber(a.clicks))}\n      ${cell(formatMoney(a.cpm))}\n      ${cell(formatMoney(a.cpc))}\n      ${cell(formatPercent(a.ctr))}\n    </tr>`;\n    });\n  // Kampanya ara toplamı\n  campaignRows += `\n  <tr style=\"background-color:#F4F3FF;\">\n    ${cell(esc(g.name) + ' Toplam&#305;', { colspan: 2, left: true, size: 12, weight: 700, color: '#6941C6' })}\n    ${metricCells(gSpend, gViews, gClicks, 600)}\n  </tr>`;\n});\n\n// Genel toplam satırı\ncampaignRows += `\n  <tr style=\"background-color:#F2F4F7;\">\n    ${cell('Genel Toplam', { colspan: 2, left: true, size: 12, weight: 700, color: '#101828' })}\n    ${metricCells(totalSpend, totalViews, totalClicks, 600)}\n  </tr>`;\n\n// ---- HTML (tasarım aynı) ----\nconst html = `<!DOCTYPE html>\n<html lang=\"tr\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">\n</head>\n<body style=\"margin:0; padding:0; background-color:#FFFFFF; font-family:Inter,Arial,Helvetica,sans-serif; -webkit-font-smoothing:antialiased;\">\n  <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#FFFFFF; padding:32px 0;\">\n    <tr>\n      <td align=\"center\">\n\n        <table role=\"presentation\" width=\"750\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin-bottom:24px;\">\n          <tr>\n            <td align=\"center\" style=\"padding-bottom:16px;\">\n              <img src=\"${IMG_LOGO}\" alt=\"MagfiADS\" width=\"180\" style=\"display:block; border:0; outline:none;\">\n            </td>\n          </tr>\n          <tr>\n            <td align=\"center\" style=\"padding-bottom:20px;\">\n              <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\">\n                <tr>\n                  <td style=\"background-color:#D1E9FF; border-radius:16px; padding:4px 14px;\">\n                    <span style=\"font-family:Inter,Arial,sans-serif; font-size:14px; font-weight:500; color:#175CD3;\">G&#252;nl&#252;k &#214;zet</span>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n        </table>\n\n        <table role=\"presentation\" width=\"750\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#FCFCFD; border:1px solid #EAECF0; border-radius:6px;\">\n          <tr>\n            <td style=\"padding:32px 32px 8px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:18px; font-weight:600; color:#0C111D; line-height:28px;\">Merhaba,</p>\n            </td>\n          </tr>\n          <tr>\n            <td style=\"padding:0 32px 28px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:14px; font-weight:400; color:#475467; line-height:22px;\">\n                ${dateStr} tarihine ait reklam performans &#246;zetiniz a&#351;a&#287;&#305;dad&#305;r.\n              </p>\n            </td>\n          </tr>\n          <tr>\n            <td style=\"padding:0 32px 16px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:16px; font-weight:600; color:#0C111D;\">Temel Metrikler</p>\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:0 32px 8px;\">\n              <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\n                <tr>\n                  <td width=\"33%\" style=\"padding:0 4px 0 0;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F9FAFB; border:1px solid #EAECF0; border-radius:16px;\">\n                      <tr><td style=\"padding:20px 16px;\">\n                        <p style=\"margin:0 0 8px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:500; color:#6941C6; text-transform:uppercase; letter-spacing:0.5px;\">Toplam Harcama</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatMoney(totalSpend)}</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                  <td width=\"33%\" style=\"padding:0 4px;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F9FAFB; border:1px solid #EAECF0; border-radius:16px;\">\n                      <tr><td style=\"padding:20px 16px;\">\n                        <p style=\"margin:0 0 8px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:500; color:#6941C6; text-transform:uppercase; letter-spacing:0.5px;\">G&#246;r&#252;nt&#252;lenme</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatNumber(totalViews)}</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                  <td width=\"33%\" style=\"padding:0 0 0 4px;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F9FAFB; border:1px solid #EAECF0; border-radius:16px;\">\n                      <tr><td style=\"padding:20px 16px;\">\n                        <p style=\"margin:0 0 8px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:500; color:#6941C6; text-transform:uppercase; letter-spacing:0.5px;\">T&#305;klama</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatNumber(totalClicks)}</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:0 32px 28px;\">\n              <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\n                <tr>\n                  <td width=\"33%\" style=\"padding:0 4px 0 0;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F9FAFB; border:1px solid #EAECF0; border-radius:16px;\">\n                      <tr><td style=\"padding:20px 16px;\">\n                        <p style=\"margin:0 0 8px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:500; color:#6941C6; text-transform:uppercase; letter-spacing:0.5px;\">BGBM (CPM)</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatMoney(totalCpm)}</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                  <td width=\"33%\" style=\"padding:0 4px;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F9FAFB; border:1px solid #EAECF0; border-radius:16px;\">\n                      <tr><td style=\"padding:20px 16px;\">\n                        <p style=\"margin:0 0 8px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:500; color:#6941C6; text-transform:uppercase; letter-spacing:0.5px;\">TO (CTR)</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatPercent(totalCtr)}</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                  <td width=\"33%\" style=\"padding:0 0 0 4px;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F9FAFB; border:1px solid #EAECF0; border-radius:16px;\">\n                      <tr><td style=\"padding:20px 16px;\">\n                        <p style=\"margin:0 0 8px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:500; color:#6941C6; text-transform:uppercase; letter-spacing:0.5px;\">TBM (CPC)</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatMoney(totalCpc)}</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <tr>\n            <td style=\"padding:0 32px 16px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:16px; font-weight:600; color:#0C111D;\">D&#246;nemsel Harcama</p>\n            </td>\n          </tr>\n          <tr>\n            <td style=\"padding:0 32px 28px;\">\n              <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\n                <tr>\n                  <td width=\"33%\" style=\"padding:0 4px 0 0;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F2F4F7; border-radius:16px;\">\n                      <tr><td style=\"padding:20px;\">\n                        <p style=\"margin:0 0 4px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:600; color:#475467; text-transform:uppercase; letter-spacing:0.5px;\">SON 7 G&#220;N</p>\n                        <p style=\"margin:0 0 2px; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatMoney(spend7d)}</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:400; color:#475467;\">Harcama</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                  <td width=\"33%\" style=\"padding:0 4px;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F2F4F7; border-radius:16px;\">\n                      <tr><td style=\"padding:20px;\">\n                        <p style=\"margin:0 0 4px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:600; color:#475467; text-transform:uppercase; letter-spacing:0.5px;\">SON 30 G&#220;N</p>\n                        <p style=\"margin:0 0 2px; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatMoney(spend30d)}</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:400; color:#475467;\">Harcama</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                  <td width=\"33%\" style=\"padding:0 0 0 4px;\">\n                    <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#F2F4F7; border-radius:16px;\">\n                      <tr><td style=\"padding:20px;\">\n                        <p style=\"margin:0 0 4px; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:600; color:#475467; text-transform:uppercase; letter-spacing:0.5px;\">TOPLAM</p>\n                        <p style=\"margin:0 0 2px; font-family:Inter,Arial,sans-serif; font-size:22px; font-weight:700; color:#0C111D;\">${formatMoney(spendAll)}</p>\n                        <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:12px; font-weight:400; color:#475467;\">T&#252;m Zamanlar Harcama</p>\n                      </td></tr>\n                    </table>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n${campaignCardsHtml}\n\n          <tr>\n            <td style=\"padding:0 32px 16px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:16px; font-weight:600; color:#0C111D;\">Kampanya Detaylar&#305;</p>\n            </td>\n          </tr>\n          <tr>\n            <td style=\"padding:0 32px 32px;\">\n              <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse; border:1px solid #EAECF0; border-radius:8px; overflow:hidden;\">\n                <tr style=\"background-color:#F2F4F7;\">\n                  <th width=\"22%\" style=\"padding:10px 8px; text-align:left; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">Kampanya</th>\n                  <th width=\"22%\" style=\"padding:10px 8px; text-align:left; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">Reklam</th>\n                  <th width=\"11%\" style=\"padding:10px 8px; text-align:right; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">Harcama</th>\n                  <th width=\"10%\" style=\"padding:10px 8px; text-align:right; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">G&#246;r&#252;nt.</th>\n                  <th width=\"8%\" style=\"padding:10px 8px; text-align:right; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">T&#305;klama</th>\n                  <th width=\"9%\" style=\"padding:10px 8px; text-align:right; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">BGBM</th>\n                  <th width=\"9%\" style=\"padding:10px 8px; text-align:right; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">TBM</th>\n                  <th width=\"9%\" style=\"padding:10px 8px; text-align:right; font-family:Inter,Arial,sans-serif; font-size:11px; font-weight:600; color:#344054; text-transform:uppercase; letter-spacing:0.5px; border-bottom:1px solid #EAECF0;\">TO</th>\n                </tr>\n                ${campaignRows}\n              </table>\n            </td>\n          </tr>\n        </table>\n\n        <table role=\"presentation\" width=\"750\" cellpadding=\"0\" cellspacing=\"0\" style=\"margin-top:24px;\">\n          <tr>\n            <td style=\"padding:0 32px 12px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:12px; color:#98A2B3; line-height:18px; text-align:left;\">\n                Bu rapor otomatik olarak olu&#351;turulmu&#351;tur.<br>\n                Rapor tarihi: ${dateStr} &#183; Olu&#351;turulma: ${now}\n              </p>\n            </td>\n          </tr>\n          <tr>\n            <td style=\"padding:12px 32px;\">\n              <table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">\n                <tr><td style=\"border-top:1px solid #EAECF0; font-size:0; line-height:0;\">&#160;</td></tr>\n              </table>\n            </td>\n          </tr>\n          <tr>\n            <td align=\"center\" style=\"padding:12px 0 8px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:14px; font-weight:600; color:#0C111D;\">Contact Us</p>\n            </td>\n          </tr>\n          <tr>\n            <td align=\"center\" style=\"padding:0 0 8px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:13px; color:#475467; line-height:20px;\">\n                &#220;niversite Mah. Sar&#305;g&#252;l Sk. No: 37/1<br>\n                &#304;&#231; Kap&#305; No: 46 Avc&#305;lar / &#304;stanbul\n              </p>\n            </td>\n          </tr>\n          <tr>\n            <td align=\"center\" style=\"padding:0 0 16px;\">\n              <a href=\"mailto:info@magfi.co\" style=\"font-family:Inter,Arial,sans-serif; font-size:13px; font-weight:500; color:#6941C6; text-decoration:none;\">info@magfi.co</a>\n            </td>\n          </tr>\n          <tr>\n            <td align=\"center\" style=\"padding:0 0 20px;\">\n              <table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\">\n                <tr>\n                  <td style=\"padding:0 8px;\"><a href=\"https://www.linkedin.com/company/26188215\" target=\"_blank\" style=\"text-decoration:none;\"><img src=\"${IMG_LINKEDIN}\" alt=\"LinkedIn\" width=\"32\" height=\"32\" style=\"display:block; border:0; border-radius:50%;\"></a></td>\n                  <td style=\"padding:0 8px;\"><a href=\"https://t.me/magfiofficial\" target=\"_blank\" style=\"text-decoration:none;\"><img src=\"${IMG_TELEGRAM}\" alt=\"Telegram\" width=\"32\" height=\"32\" style=\"display:block; border:0; border-radius:50%;\"></a></td>\n                  <td style=\"padding:0 8px;\"><a href=\"https://blog.magfi.co/\" target=\"_blank\" style=\"text-decoration:none;\"><img src=\"${IMG_MEDIUM}\" alt=\"Medium\" width=\"32\" height=\"32\" style=\"display:block; border:0; border-radius:50%;\"></a></td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n          <tr>\n            <td align=\"center\" style=\"padding:0 0 24px;\">\n              <p style=\"margin:0; font-family:Inter,Arial,sans-serif; font-size:12px; color:#98A2B3;\">\n                Magfi Ads &#169; 2026 y&#305;l&#305;nda &#128156; ile &#304;stanbul'da yap&#305;ld&#305;.\n              </p>\n            </td>\n          </tr>\n        </table>\n      </td>\n    </tr>\n  </table>\n</body>\n</html>`;\n\nreturn [{ json: { html, subject: `Magfi Ads Günlük Özet — ${dateStr}` } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        -848
+      ],
+      "id": "73a48cd4-cbe7-4f0e-978e-aa592c5fdbec",
+      "name": "Code in JavaScript1",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "resource": "mail",
+        "fromEmail": "noreply@magfi.co",
+        "fromName": "Magfi Ads Daily Report",
+        "toEmail": "narkan.alabalik@stablex.com.tr",
+        "subject": "={{ $json.subject }}",
+        "contentType": "text/html",
+        "contentValue": "={{ $json.html }}",
+        "additionalFields": {
+          "ccEmail": "eylulsuvardar@magfi.co,denizduran@magfi.co"
+        }
+      },
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [
+        1344,
+        -848
+      ],
+      "id": "79efcf81-9ad2-4a7f-944d-d4684bd5cc91",
+      "name": "Send an email1",
+      "credentials": {
+        "sendGridApi": {
+          "id": "8pQsNvveM6p42vPE",
+          "name": "SendGrid account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "info": {
+      "main": [
+        [
+          {
+            "node": "statistics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "statistics": {
+      "main": [
+        [
+          {
+            "node": "lifetime",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "lifetime": {
+      "main": [
+        [
+          {
+            "node": "merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "merge": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Send an email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "004cec692b0c87b0ef064ec990057a35e206d354fff04b95b4fe0db8f1f629e9"
+  }
+}
