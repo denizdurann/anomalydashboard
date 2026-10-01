@@ -1,27 +1,19 @@
 {
   "nodes": [
     {
-      "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "triggerAtHour": 8
-            }
-          ]
-        }
-      },
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.3,
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
       "position": [
         0,
         -848
       ],
-      "id": "f472dc87-144a-4218-a2fb-3b12a1c48a8e",
-      "name": "Schedule Trigger"
+      "id": "2c9e4b7a-6d1f-4a3e-8b52-7f0d9c1e3a64",
+      "name": "When clicking 'Execute workflow'"
     },
     {
       "parameters": {
-        "jsCode": "// ============================================================\n// RAPOR TARİHİ AYARI\n// Boş ('') bırakılırsa normal çalışır: gönderim günü = bugün (Europe/Istanbul),\n// rapor günü = dün.\n// 'YYYY-MM-DD' yazılırsa workflow o gün çalışıyormuş gibi davranır\n// (örn. '2026-10-02' → 1 Ekim 2026 raporu üretilir).\n// ============================================================\nconst RUN_DATE_OVERRIDE = '';\n\nconst pad = (n) => String(n).padStart(2, '0');\nfunction addDaysStr(dateStr, days) {\n  const parts = dateStr.split('-').map(Number);\n  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));\n  dt.setUTCDate(dt.getUTCDate() + days);\n  return dt.getUTCFullYear() + '-' + pad(dt.getUTCMonth() + 1) + '-' + pad(dt.getUTCDate());\n}\n\nconst todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Istanbul' });\nconst runDate  = /^\\d{4}-\\d{2}-\\d{2}$/.test(RUN_DATE_OVERRIDE) ? RUN_DATE_OVERRIDE : todayIst;\nconst maxDay   = addDaysStr(runDate, -1);   // rapor günü (\"dün\")\n\nreturn [{ json: {\n  runDate,\n  maxDay,\n  startDay: addDaysStr(maxDay, -30),        // statistics sorgusunun alt sınırı\n  isOverride: runDate !== todayIst,\n} }];"
+        "jsCode": "// ============================================================\n// RAPOR TARİHİ AYARI\n// Boş ('') bırakılırsa normal çalışır: gönderim günü = bugün (Europe/Istanbul),\n// rapor günü = dün.\n// 'YYYY-MM-DD' yazılırsa workflow o gün çalışıyormuş gibi davranır\n// (örn. '2026-10-02' → 1 Ekim 2026 raporu üretilir).\n// ============================================================\nconst RUN_DATE_OVERRIDE = '2026-10-02';\n\nconst pad = (n) => String(n).padStart(2, '0');\nfunction addDaysStr(dateStr, days) {\n  const parts = dateStr.split('-').map(Number);\n  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));\n  dt.setUTCDate(dt.getUTCDate() + days);\n  return dt.getUTCFullYear() + '-' + pad(dt.getUTCMonth() + 1) + '-' + pad(dt.getUTCDate());\n}\n\nconst todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Istanbul' });\nconst runDate  = /^\\d{4}-\\d{2}-\\d{2}$/.test(RUN_DATE_OVERRIDE) ? RUN_DATE_OVERRIDE : todayIst;\nconst maxDay   = addDaysStr(runDate, -1);   // rapor günü (\"dün\")\n\nreturn [{ json: {\n  runDate,\n  maxDay,\n  startDay: addDaysStr(maxDay, -30),        // statistics sorgusunun alt sınırı\n  isOverride: runDate !== todayIst,\n} }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -32,7 +24,7 @@
       "id": "9a3f6c21-58d4-4e0b-a7c9-1e2d3f4b5a6c",
       "name": "config",
       "notesInFlow": true,
-      "notes": "RUN_DATE_OVERRIDE boş = normal çalışma"
+      "notes": "TEST: 2 Ekim'de çalışıyormuş gibi (1 Ekim raporu)"
     },
     {
       "parameters": {
@@ -139,13 +131,11 @@
         "resource": "mail",
         "fromEmail": "noreply@magfi.co",
         "fromName": "Magfi Ads Daily Report",
-        "toEmail": "narkan.alabalik@stablex.com.tr",
-        "subject": "={{ $json.subject }}",
+        "toEmail": "denizduran@magfi.co",
+        "subject": "=[TEST] {{ $json.subject }}",
         "contentType": "text/html",
         "contentValue": "={{ $json.html }}",
-        "additionalFields": {
-          "ccEmail": "eylulsuvardar@magfi.co,denizduran@magfi.co"
-        }
+        "additionalFields": {}
       },
       "type": "n8n-nodes-base.sendGrid",
       "typeVersion": 1,
@@ -164,7 +154,7 @@
     }
   ],
   "connections": {
-    "Schedule Trigger": {
+    "When clicking 'Execute workflow'": {
       "main": [
         [
           {
